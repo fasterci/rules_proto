@@ -350,15 +350,30 @@ def _proto_compile_impl(ctx):
     # output_file_map = {f.short_path[len(ctx.label.package):].lstrip("/"): f for f in outputs}
     output_file_map = {f.short_path: f for f in outputs}
 
+    if ctx.attr.output_file_suffix:
+        for [rel, original_file] in output_file_map.items():
+            dst_name = original_file.basename + ctx.attr.output_file_suffix
+            copy_file = ctx.actions.declare_file(dst_name, sibling = original_file)
+            ctx.actions.run_shell(
+                mnemonic = "ProtoCompileCopyFile",
+                inputs = [original_file],
+                outputs = [copy_file],
+                command = "cp '{}' '{}'".format(original_file.path, copy_file.path),
+                progress_message = "copying {} to {}".format(original_file.basename, copy_file.basename),
+            )
+            output_file_map[rel] = copy_file
+
+    output_files = output_file_map.values()
+
     providers = [
         ProtoCompileInfo(
             label = ctx.label,
-            outputs = outputs,
+            outputs = output_files,
             output_file_map = output_file_map,
         ),
     ]
     if ctx.attr.default_info:
-        providers.append(DefaultInfo(files = depset(outputs)))
+        providers.append(DefaultInfo(files = depset(output_files)))
 
     return providers
 
@@ -408,6 +423,9 @@ proto_compile = rule(
         "default_info": attr.bool(
             doc = "If false, do not return the DefaultInfo provider",
             default = True,
+        ),
+        "output_file_suffix": attr.string(
+            doc = "If set, copy the output files to a new set having this suffix",
         ),
     },
     toolchains = ["@build_stack_rules_proto//toolchain:protoc"],
