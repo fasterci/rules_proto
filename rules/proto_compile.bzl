@@ -347,7 +347,8 @@ def _proto_compile_impl(ctx):
     #     pass
 
     # comprehend a mapping of relpath -> File
-    output_file_map = {f.short_path[len(ctx.label.package):].lstrip("/"): f for f in outputs}
+    # output_file_map = {f.short_path[len(ctx.label.package):].lstrip("/"): f for f in outputs}
+    output_file_map = {f.short_path: f for f in outputs}
 
     providers = [
         ProtoCompileInfo(

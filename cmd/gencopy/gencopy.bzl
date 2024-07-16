@@ -19,6 +19,10 @@ gencopy_attrs = {
         doc = "The label.name used to regenerate targets",
         mandatory = True,
     ),
+    "extension": attr.string(
+        doc = "optional file extension to add to the copied file",
+        mandatory = False,
+    ),
     "_gencopy_script": attr.label(
         doc = "The gencopy script template",
         default = str(Label("//cmd/gencopy:gencopy.bash.in")),

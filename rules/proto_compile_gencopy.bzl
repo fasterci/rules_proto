@@ -29,10 +29,10 @@ def _proto_compile_gencopy_run_impl(ctx):
     for info in [dep[ProtoCompileInfo] for dep in ctx.attr.deps]:
         srcs = []
         dsts = []
-        for [rel, f] in info.output_file_map.items():
+        for [rel, generated_file] in info.output_file_map.items():
+            runfiles.append(generated_file)
+            srcs.append(generated_file.short_path)
             dsts.append(rel)
-            srcs.append(f.short_path)
-            runfiles.append(f)
 
         config.packageConfigs.append(
             struct(
@@ -60,13 +60,9 @@ proto_compile_gencopy_run = rule(
             doc = "The ProtoCompileInfo providers",
             providers = [ProtoCompileInfo],
         ),
-        srcs = attr.label_list(
-            doc = "The source files",
-            allow_files = True,
-        ),
     ),
     executable = True,
-    test = is_test,
+    test = False,
 )
 
 def _proto_compile_gencopy_test_impl(ctx):
@@ -74,45 +70,30 @@ def _proto_compile_gencopy_test_impl(ctx):
 
     runfiles = []
 
-    # comprehend a mapping of relpath -> File
-    srcfiles = {f.short_path[len(ctx.label.package):].lstrip("/"): f for f in ctx.files.srcs}
+    source_file_map = {f.short_path: f for f in ctx.files.srcs}
 
     for info in [dep[ProtoCompileInfo] for dep in ctx.attr.deps]:
-        runfiles += info.output_file_map.values()
-        srcfiles = info.output_file_map
+        srcs = []
+        dsts = []
+        for [rel, generated_file] in info.output_file_map.items():
+            source_file = source_file_map.get(rel)
+            if not source_file:
+                fail("could not find matching source file for generated file %s in %r" % (rel, source_file_map.keys()))
 
-        srcs = []  # list of string
-        for f in info.outputs:
-            if config.mode == "check":
-                # if we are in 'check' mode, the src and dst cannot be the same
-                # file, so make a copy of it...  but first, we need to find it
-                # in the srcs files!
-                found = False
-                for srcfilename, srcfile in srcfiles.items():
-                    if srcfilename == f.basename:
-                        replica = ctx.actions.declare_file(f.basename + ".actual", sibling = f)
-                        _copy_file(ctx.actions, srcfile, replica)
-                        runfiles.append(replica)
-                        srcs.append(replica.short_path)
-                        found = True
-                        break
-                    elif srcfilename == f.basename + ctx.attr.extension:
-                        runfiles.append(srcfile)
-                        srcs.append(srcfile.short_path)
-                        found = True
-                        break
-                if not found:
-                    fail("could not find matching source file for generated file %s in %r" % (f.basename, srcfiles))
+            if source_file.short_path == generated_file.short_path:
+                fail("source file path must be distinct from generated file path (src=%s, dst=%s)" % (source_file.short_path, generated_file.short_path))
 
-            else:
-                srcs.append(f.short_path)
+            runfiles.append(source_file)
+            runfiles.append(generated_file)
+            srcs.append(source_file.short_path)
+            dsts.append(generated_file.short_path)
 
         config.packageConfigs.append(
             struct(
                 targetLabel = str(info.label),
                 targetPackage = info.label.package,
                 targetWorkspaceRoot = info.label.workspace_root,
-                generatedFiles = [f.short_path for f in info.outputs],
+                generatedFiles = dsts,
                 sourceFiles = srcs,
             ),
         )
@@ -125,7 +106,7 @@ def _proto_compile_gencopy_test_impl(ctx):
         executable = script,
     )]
 
-proto_compile_gencopy_rule_test = rule(
+proto_compile_gencopy_test = rule(
     implementation = _proto_compile_gencopy_test_impl,
     attrs = dict(
         gencopy_attrs,
@@ -137,11 +118,24 @@ proto_compile_gencopy_rule_test = rule(
             doc = "The source files",
             allow_files = True,
         ),
-        extension = attr.string(
-            doc = "optional file extension to add to the copied file",
-            mandatory = False,
-        ),
     ),
     executable = True,
     test = True,
 )
+
+# found = False
+# for srcfilename, srcfile in srcfiles.items():
+#     if srcfilename == f.basename:
+#         replica = ctx.actions.declare_file(f.basename + ".actual", sibling = f)
+#         _copy_file(ctx.actions, srcfile, replica)
+#         runfiles.append(replica)
+#         srcs.append(replica.short_path)
+#         found = True
+#         break
+#     elif srcfilename == f.basename + ctx.attr.extension:
+#         runfiles.append(srcfile)
+#         srcs.append(srcfile.short_path)
+#         found = True
+#         break
+# if not found:
+#     fail("could not find matching source file for generated file %s in %r" % (f.basename, srcfiles))
