@@ -146,6 +146,12 @@ def _proto_compile_impl(ctx):
     # mut <dict<string,string>> post-processing modifications for the compile action
     mods = dict()
 
+    # out_dir is used in conjunction with file.short_path to determine output
+    # file paths
+    out_dir = ctx.bin_dir.path
+    if ctx.label.workspace_root:
+        out_dir = "/".join([out_dir, ctx.label.workspace_root])
+
     ###
     ### Part 2: per-plugin args
     ###
@@ -276,16 +282,16 @@ def _proto_compile_impl(ctx):
     # into place
     if len(ctx.attr.output_mappings) > 0:
         copy_commands = []
-        out_dir = ctx.bin_dir.path
-        if ctx.label.workspace_root:
-            out_dir = "/".join([out_dir, ctx.label.workspace_root])
         for mapping in ctx.attr.output_mappings:
             basename, _, intermediate_filename = mapping.partition("=")
-            intermediate_filename = "/".join([out_dir, intermediate_filename])
             output = outputs_by_basename.get(basename, None)
             if not output:
                 fail("the mapped file '%s' was not listed in outputs" % basename)
-            copy_commands.append("cp '{}' '{}'".format(intermediate_filename, output.path))
+            copy_commands.append("cp '{dir}/{src}' '{dir}/{dst}'".format(
+                dir = out_dir,
+                src = intermediate_filename,
+                dst = output.short_path,
+            ))
         copy_script = ctx.actions.declare_file(ctx.label.name + "_copy.sh")
         ctx.actions.write(copy_script, "\n".join(copy_commands), is_executable = True)
         inputs.append(copy_script)
@@ -297,15 +303,22 @@ def _proto_compile_impl(ctx):
         for suffix, action in mods.items():
             for f in outputs:
                 if f.short_path.endswith(suffix):
-                    mv_commands.append("awk '%s' %s > %s.tmp" % (action, f.path, f.path))
-                    mv_commands.append("mv %s.tmp %s" % (f.path, f.path))
+                    mv_commands.append("awk '{action}' {dir}/{short_path} > {dir}/{short_path}.tmp".format(
+                        action = action,
+                        dir = out_dir,
+                        short_path = f.short_path,
+                    ))
+                    mv_commands.append("mv {dir}/{short_path}.tmp {dir}/{short_path}".format(
+                        dir = out_dir,
+                        short_path = f.short_path,
+                    ))
         mv_script = ctx.actions.declare_file(ctx.label.name + "_mv.sh")
         ctx.actions.write(mv_script, "\n".join(mv_commands), is_executable = True)
         inputs.append(mv_script)
         commands.append(mv_script.path)
 
     if verbose:
-        before = ["env", "pwd", "ls -al .", "echo '\n##### SANDBOX BEFORE RUNNING PROTOC'", "find * -type l"]
+        before = ["env", "pwd", "ls -al .", "echo '\n##### SANDBOX BEFORE RUNNING PROTOC'", "find * -type l | grep -v node_modules"]
         after = ["echo '\n##### SANDBOX AFTER RUNNING PROTOC'", "find * -type f"]
         commands = before + commands + after
 
@@ -350,8 +363,12 @@ def _proto_compile_impl(ctx):
                 mnemonic = "ProtoCompileCopyFile",
                 inputs = [original_file],
                 outputs = [copy_file],
-                command = "cp '{}' '{}'".format(original_file.path, copy_file.path),
-                progress_message = "copying {} to {}".format(original_file.basename, copy_file.basename),
+                command = "cp '{dir}/{src}' '{dir}/{dst}'".format(
+                    dir = ctx.bin_dir.path,
+                    src = original_file.short_path,
+                    dst = copy_file.short_path,
+                ),
+                progress_message = "copying output file {} to {}".format(original_file.short_path, copy_file.short_path),
             )
             output_file_map[rel] = copy_file
 
@@ -408,6 +425,7 @@ proto_compile = rule(
         ),
         "verbose": attr.bool(
             doc = "The verbosity flag.",
+            default = False,
         ),
         "default_info": attr.bool(
             doc = "If false, do not return the DefaultInfo provider",
