@@ -93,19 +93,37 @@ def _strip_path_prefix(path, prefix):
 def is_windows(ctx):
     return ctx.configuration.host_path_separator == ";"
 
+def _get_package_relative_path(label, filename):
+    rel = filename
+    if rel.startswith(label.package):
+        rel = rel[len(label.package):]
+    return rel.lstrip("/")
+
 def _proto_compile_impl(ctx):
-    # mut <list<File>>
-    outputs = [] + ctx.outputs.outputs
+    ###
+    ### Part 1: setup variables used in scope
+    ###
 
     if len(ctx.attr.srcs) > 0 and len(ctx.outputs.outputs) > 0:
         fail("rule must provide 'srcs' or 'outputs' (but not both)")
 
-    if len(ctx.attr.srcs) > 0:
-        outputs = [ctx.actions.declare_file(name) for name in ctx.attr.srcs]
+    # <dict<string,File>: output files mapped by their package-relative path.
+    outputs = {}
 
-    ###
-    ### Part 1: setup variables used in scope
-    ###
+    if len(ctx.attr.srcs):
+        # assume filenames in srcs are already package-relative
+        for name in ctx.attr.srcs:
+            rel = "/".join([ctx.label.package, name])
+            f = ctx.actions.declare_file(name)
+            outputs[rel] = f
+    else:
+        for f in ctx.outputs.outputs:
+            # rel = _get_package_relative_path(ctx.label, f.short_path)
+            rel = f.short_path
+            outputs[rel] = f
+
+    # const <dict<string,File>.  outputs indexed by basename.
+    outputs_by_basename = {f.basename: f for f in outputs.values()}
 
     # const <bool> verbosity flag
     verbose = ctx.attr.verbose
@@ -121,9 +139,6 @@ def _proto_compile_impl(ctx):
 
     # const <dict<string,string>>
     outs = {_plugin_label_key(Label(k)): v for k, v in ctx.attr.outs.items()}
-
-    # const <dict<string,File>.  outputs indexed by basename.
-    outputs_by_basename = {f.basename: f for f in outputs}
 
     # mut <list<File>> set of descriptors for the compile action
     descriptors = proto_info.transitive_descriptor_sets.to_list()
@@ -301,7 +316,7 @@ def _proto_compile_impl(ctx):
     if len(mods):
         mv_commands = []
         for suffix, action in mods.items():
-            for f in outputs:
+            for f in outputs.values():
                 if f.short_path.endswith(suffix):
                     mv_commands.append("awk '{action}' {dir}/{short_path} > {dir}/{short_path}.tmp".format(
                         action = action,
@@ -337,7 +352,7 @@ def _proto_compile_impl(ctx):
         for f in inputs:
             # buildifier: disable=print
             print("INPUT:", f.path)
-        for f in outputs:
+        for f in outputs.values():
             # buildifier: disable=print
             print("EXPECTED OUTPUT:", f.path)
 
@@ -346,17 +361,15 @@ def _proto_compile_impl(ctx):
         command = "\n".join(commands),
         inputs = inputs,
         mnemonic = "Protoc",
-        outputs = outputs,
+        outputs = outputs.values(),
         progress_message = "Compiling protoc outputs for %r" % [f.basename for f in protos],
         tools = tools,
         input_manifests = input_manifests,
         env = {"BAZEL_BINDIR": ctx.bin_dir.path},
     )
 
-    output_file_map = {f.short_path: f for f in outputs}
-
     if ctx.attr.output_file_suffix:
-        for [rel, original_file] in output_file_map.items():
+        for rel, original_file in outputs.items():
             dst_name = original_file.basename + ctx.attr.output_file_suffix
             copy_file = ctx.actions.declare_file(dst_name, sibling = original_file)
             ctx.actions.run_shell(
@@ -370,19 +383,17 @@ def _proto_compile_impl(ctx):
                 ),
                 progress_message = "copying output file {} to {}".format(original_file.short_path, copy_file.short_path),
             )
-            output_file_map[rel] = copy_file
-
-    output_files = output_file_map.values()
+            outputs[rel] = copy_file
 
     providers = [
         ProtoCompileInfo(
             label = ctx.label,
-            outputs = output_files,
-            output_file_map = output_file_map,
+            outputs = outputs.values(),
+            output_file_map = outputs,
         ),
     ]
     if ctx.attr.default_info:
-        providers.append(DefaultInfo(files = depset(output_files)))
+        providers.append(DefaultInfo(files = depset(outputs.values())))
 
     return providers
 
