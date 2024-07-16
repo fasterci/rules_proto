@@ -93,18 +93,18 @@ def _strip_path_prefix(path, prefix):
 def is_windows(ctx):
     return ctx.configuration.host_path_separator == ";"
 
+def _make_output_filename(ctx, name):
+    return name + ctx.attr.output_suffix
+
 def _proto_compile_impl(ctx):
     # mut <list<File>>
     outputs = [] + ctx.outputs.outputs
 
-    # mut <?string> If defined, we are using the srcs to predict the outputs
-    # srcgen_ext = None
-    if len(ctx.attr.srcs) > 0:
-        if len(ctx.outputs.outputs) > 0:
-            fail("rule must provide 'srcs' or 'outputs', but not both")
+    if len(ctx.attr.srcs) > 0 and len(ctx.outputs.outputs) > 0:
+        fail("rule must provide 'srcs' or 'outputs' (but not both)")
 
-        # srcgen_ext = ctx.attr.srcgen_ext
-        outputs = [ctx.actions.declare_file(name) for name in ctx.attr.srcs]
+    if len(ctx.attr.srcs) > 0:
+        outputs = [ctx.actions.declare_file(_make_output_filename(ctx, name)) for name in ctx.attr.srcs]
 
     ###
     ### Part 1: setup variables used in scope
@@ -343,10 +343,23 @@ def _proto_compile_impl(ctx):
         env = {"BAZEL_BINDIR": ctx.bin_dir.path},
     )
 
-    return [
-        ProtoCompileInfo(label = ctx.label, outputs = outputs),
-        DefaultInfo(files = depset(outputs)),
+    # if not ctx.attr.default_info:
+    #     pass
+
+    # comprehend a mapping of relpath -> File
+    output_file_map = {f.short_path[len(ctx.label.package):].lstrip("/"): f for f in outputs}
+
+    providers = [
+        ProtoCompileInfo(
+            label = ctx.label,
+            outputs = outputs,
+            output_file_map = output_file_map,
+        ),
     ]
+    if ctx.attr.default_info:
+        providers.append(DefaultInfo(files = depset(outputs)))
+
+    return providers
 
 proto_compile = rule(
     implementation = _proto_compile_impl,
@@ -359,6 +372,9 @@ proto_compile = rule(
         ),
         "srcs": attr.string_list(
             doc = "List of source files we expect to be regenerated (relative to package)",
+        ),
+        "output_suffix": attr.string(
+            doc = "An optional suffix to be appended to output files",
         ),
         "plugins": attr.label_list(
             doc = "List of ProtoPluginInfo providers",
@@ -387,6 +403,10 @@ proto_compile = rule(
         ),
         "verbose": attr.bool(
             doc = "The verbosity flag.",
+        ),
+        "default_info": attr.bool(
+            doc = "If false, do not return the DefaultInfo provider",
+            default = True,
         ),
     },
     toolchains = ["@build_stack_rules_proto//toolchain:protoc"],

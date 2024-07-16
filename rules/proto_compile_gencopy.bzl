@@ -22,7 +22,7 @@ def _copy_file(actions, src, dst):
         progress_message = "copying {} to {}".format(src.path, dst.path),
     )
 
-def _proto_compile_gencopy_impl(ctx):
+def _proto_compile_gencopy_run_impl(ctx):
     config = gencopy_config(ctx)
 
     runfiles = []
@@ -31,13 +31,15 @@ def _proto_compile_gencopy_impl(ctx):
     srcfiles = {f.short_path[len(ctx.label.package):].lstrip("/"): f for f in ctx.files.srcs}
 
     for info in [dep[ProtoCompileInfo] for dep in ctx.attr.deps]:
-        runfiles += info.outputs
+        runfiles += info.output_file_map.values()
+        srcfiles = info.output_file_map
 
         srcs = []  # list of string
         for f in info.outputs:
             if config.mode == "check":
-                # if we are in 'check' mode, the src and dst cannot be the same file, so
-                # make a copy of it...  but first, we need to find it in the srcs files!
+                # if we are in 'check' mode, the src and dst cannot be the same
+                # file, so make a copy of it...  but first, we need to find it
+                # in the srcs files!
                 found = False
                 for srcfilename, srcfile in srcfiles.items():
                     if srcfilename == f.basename:
@@ -76,27 +78,100 @@ def _proto_compile_gencopy_impl(ctx):
         executable = script,
     )]
 
-def _proto_compile_gencopy_rule(is_test):
-    return rule(
-        implementation = _proto_compile_gencopy_impl,
-        attrs = dict(
-            gencopy_attrs,
-            deps = attr.label_list(
-                doc = "The ProtoCompileInfo providers",
-                providers = [ProtoCompileInfo],
-            ),
-            srcs = attr.label_list(
-                doc = "The source files",
-                allow_files = True,
-            ),
-            extension = attr.string(
-                doc = "optional file extension to add to the copied file",
-                mandatory = False,
-            ),
+proto_compile_gencopy_run = rule(
+    implementation = _proto_compile_gencopy_run_impl,
+    attrs = dict(
+        gencopy_attrs,
+        deps = attr.label_list(
+            doc = "The ProtoCompileInfo providers",
+            providers = [ProtoCompileInfo],
         ),
-        executable = True,
-        test = is_test,
-    )
+        srcs = attr.label_list(
+            doc = "The source files",
+            allow_files = True,
+        ),
+        extension = attr.string(
+            doc = "optional file extension to add to the copied file",
+            mandatory = False,
+        ),
+    ),
+    executable = True,
+    test = is_test,
+)
 
-proto_compile_gencopy_test = _proto_compile_gencopy_rule(True)
-proto_compile_gencopy_run = _proto_compile_gencopy_rule(False)
+def _proto_compile_gencopy_test_impl(ctx):
+    config = gencopy_config(ctx)
+
+    runfiles = []
+
+    # comprehend a mapping of relpath -> File
+    srcfiles = {f.short_path[len(ctx.label.package):].lstrip("/"): f for f in ctx.files.srcs}
+
+    for info in [dep[ProtoCompileInfo] for dep in ctx.attr.deps]:
+        runfiles += info.output_file_map.values()
+        srcfiles = info.output_file_map
+
+        srcs = []  # list of string
+        for f in info.outputs:
+            if config.mode == "check":
+                # if we are in 'check' mode, the src and dst cannot be the same
+                # file, so make a copy of it...  but first, we need to find it
+                # in the srcs files!
+                found = False
+                for srcfilename, srcfile in srcfiles.items():
+                    if srcfilename == f.basename:
+                        replica = ctx.actions.declare_file(f.basename + ".actual", sibling = f)
+                        _copy_file(ctx.actions, srcfile, replica)
+                        runfiles.append(replica)
+                        srcs.append(replica.short_path)
+                        found = True
+                        break
+                    elif srcfilename == f.basename + ctx.attr.extension:
+                        runfiles.append(srcfile)
+                        srcs.append(srcfile.short_path)
+                        found = True
+                        break
+                if not found:
+                    fail("could not find matching source file for generated file %s in %r" % (f.basename, srcfiles))
+
+            else:
+                srcs.append(f.short_path)
+
+        config.packageConfigs.append(
+            struct(
+                targetLabel = str(info.label),
+                targetPackage = info.label.package,
+                targetWorkspaceRoot = info.label.workspace_root,
+                generatedFiles = [f.short_path for f in info.outputs],
+                sourceFiles = srcs,
+            ),
+        )
+
+    config_json, script, runfiles = gencopy_action(ctx, config, runfiles)
+
+    return [DefaultInfo(
+        files = depset([config_json]),
+        runfiles = runfiles,
+        executable = script,
+    )]
+
+proto_compile_gencopy_rule_test = rule(
+    implementation = _proto_compile_gencopy_test_impl,
+    attrs = dict(
+        gencopy_attrs,
+        deps = attr.label_list(
+            doc = "The ProtoCompileInfo providers",
+            providers = [ProtoCompileInfo],
+        ),
+        srcs = attr.label_list(
+            doc = "The source files",
+            allow_files = True,
+        ),
+        extension = attr.string(
+            doc = "optional file extension to add to the copied file",
+            mandatory = False,
+        ),
+    ),
+    executable = True,
+    test = True,
+)
