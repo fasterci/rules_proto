@@ -93,9 +93,6 @@ def _strip_path_prefix(path, prefix):
 def is_windows(ctx):
     return ctx.configuration.host_path_separator == ";"
 
-def _make_output_filename(ctx, name):
-    return name + ctx.attr.output_suffix
-
 def _proto_compile_impl(ctx):
     # mut <list<File>>
     outputs = [] + ctx.outputs.outputs
@@ -104,7 +101,7 @@ def _proto_compile_impl(ctx):
         fail("rule must provide 'srcs' or 'outputs' (but not both)")
 
     if len(ctx.attr.srcs) > 0:
-        outputs = [ctx.actions.declare_file(_make_output_filename(ctx, name)) for name in ctx.attr.srcs]
+        outputs = [ctx.actions.declare_file(name) for name in ctx.attr.srcs]
 
     ###
     ### Part 1: setup variables used in scope
@@ -343,11 +340,6 @@ def _proto_compile_impl(ctx):
         env = {"BAZEL_BINDIR": ctx.bin_dir.path},
     )
 
-    # if not ctx.attr.default_info:
-    #     pass
-
-    # comprehend a mapping of relpath -> File
-    # output_file_map = {f.short_path[len(ctx.label.package):].lstrip("/"): f for f in outputs}
     output_file_map = {f.short_path: f for f in outputs}
 
     if ctx.attr.output_file_suffix:
@@ -388,9 +380,6 @@ proto_compile = rule(
         ),
         "srcs": attr.string_list(
             doc = "List of source files we expect to be regenerated (relative to package)",
-        ),
-        "output_suffix": attr.string(
-            doc = "An optional suffix to be appended to output files",
         ),
         "plugins": attr.label_list(
             doc = "List of ProtoPluginInfo providers",
