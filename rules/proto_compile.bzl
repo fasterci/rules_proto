@@ -93,37 +93,48 @@ def _strip_path_prefix(path, prefix):
 def is_windows(ctx):
     return ctx.configuration.host_path_separator == ";"
 
-def _get_package_relative_path(label, filename):
-    rel = filename
-    if rel.startswith(label.package):
-        rel = rel[len(label.package):]
-    return rel.lstrip("/")
-
 def _proto_compile_impl(ctx):
     ###
     ### Part 1: setup variables used in scope
     ###
 
+    # out_dir is used in conjunction with file.short_path to determine root
+    # output file paths
+    out_dir = ctx.bin_dir.path
+    if ctx.label.workspace_root:
+        out_dir = "/".join([out_dir, ctx.label.workspace_root])
+
     if len(ctx.attr.srcs) > 0 and len(ctx.outputs.outputs) > 0:
         fail("rule must provide 'srcs' or 'outputs' (but not both)")
 
     # <dict<string,File>: output files mapped by their package-relative path.
-    outputs = {}
+    # This struct is given to the provider.
+    output_files_by_rel_path = {}
+
+    # const <dict<string,string>.  The key is the file basename, value is the
+    # short_path of the output file.
+    output_short_paths_by_basename = {}
+
+    # renames is a mapping from the output filename that was produced by the
+    # plugin to the actual name we want to output.
+    renames = {}
 
     if len(ctx.attr.srcs):
         # assume filenames in srcs are already package-relative
         for name in ctx.attr.srcs:
             rel = "/".join([ctx.label.package, name])
-            f = ctx.actions.declare_file(name)
-            outputs[rel] = f
+            actual_name = name + ctx.attr.output_file_suffix
+            if actual_name != name:
+                renames[rel] = "/".join([ctx.label.package, actual_name])
+            f = ctx.actions.declare_file(actual_name)
+            output_files_by_rel_path[rel] = f
+            output_short_paths_by_basename[name] = rel
     else:
         for f in ctx.outputs.outputs:
             # rel = _get_package_relative_path(ctx.label, f.short_path)
             rel = f.short_path
-            outputs[rel] = f
-
-    # const <dict<string,File>.  outputs indexed by basename.
-    outputs_by_basename = {f.basename: f for f in outputs.values()}
+            output_files_by_rel_path[rel] = f
+            output_short_paths_by_basename[f.basename] = rel
 
     # const <bool> verbosity flag
     verbose = ctx.attr.verbose
@@ -160,12 +171,6 @@ def _proto_compile_impl(ctx):
 
     # mut <dict<string,string>> post-processing modifications for the compile action
     mods = dict()
-
-    # out_dir is used in conjunction with file.short_path to determine output
-    # file paths
-    out_dir = ctx.bin_dir.path
-    if ctx.label.workspace_root:
-        out_dir = "/".join([out_dir, ctx.label.workspace_root])
 
     ###
     ### Part 2: per-plugin args
@@ -299,13 +304,13 @@ def _proto_compile_impl(ctx):
         copy_commands = []
         for mapping in ctx.attr.output_mappings:
             basename, _, intermediate_filename = mapping.partition("=")
-            output = outputs_by_basename.get(basename, None)
-            if not output:
+            output_short_path = output_short_paths_by_basename.get(basename)
+            if not output_short_path:
                 fail("the mapped file '%s' was not listed in outputs" % basename)
             copy_commands.append("cp '{dir}/{src}' '{dir}/{dst}'".format(
                 dir = out_dir,
                 src = intermediate_filename,
-                dst = output.short_path,
+                dst = output_short_path,
             ))
         copy_script = ctx.actions.declare_file(ctx.label.name + "_copy.sh")
         ctx.actions.write(copy_script, "\n".join(copy_commands), is_executable = True)
@@ -316,21 +321,50 @@ def _proto_compile_impl(ctx):
     if len(mods):
         mv_commands = []
         for suffix, action in mods.items():
-            for f in outputs.values():
-                if f.short_path.endswith(suffix):
+            for output_short_path in output_short_paths_by_basename.values():
+                if output_short_path.endswith(suffix):
                     mv_commands.append("awk '{action}' {dir}/{short_path} > {dir}/{short_path}.tmp".format(
                         action = action,
                         dir = out_dir,
-                        short_path = f.short_path,
+                        short_path = output_short_path,
                     ))
                     mv_commands.append("mv {dir}/{short_path}.tmp {dir}/{short_path}".format(
                         dir = out_dir,
-                        short_path = f.short_path,
+                        short_path = output_short_path,
                     ))
         mv_script = ctx.actions.declare_file(ctx.label.name + "_mv.sh")
         ctx.actions.write(mv_script, "\n".join(mv_commands), is_executable = True)
         inputs.append(mv_script)
         commands.append(mv_script.path)
+
+    # if the ctx.attr.output_file_suffix was set in conjunction with
+    # ctx.attr.srcs, we want to rename all the output files to a different
+    # suffix (e.g. foo.ts -> foo.ts.gen).  The relocates the files that were
+    # generated by protoc plugins to a different name.  This is used by the
+    # 'proto_compiled_sources' rule.  The reason is that if we also have a
+    # `foo.ts` source file sitting in the workspace (checked into git), rules
+    # like `ts_project` will perform a 'copy_to_bin' action on the file.  If we
+    # didn't do this rename, the ts_project rule and the proto_compile rule
+    # would attempt to create the same output file in bazel-bin (foo.ts),
+    # causing an error.
+    #
+    # In the case of proto_compiled_sources, executing `bazel run
+    # //proto:foo_ts.update` would generate the file
+    # `bazel-bin/proto/foo.ts.gen` and the gencopy operation will copy that file
+    # to `WORKSPACE/proto/foo.ts`, essentially making the `.gen` a
+    # temporary-like file.
+    if len(renames):
+        rename_commands = []
+        for src, dst in renames.items():
+            rename_commands.append("mv {dir}/{src} {dir}/{dst}".format(
+                dir = out_dir,
+                src = src,
+                dst = dst,
+            ))
+        rename_script = ctx.actions.declare_file(ctx.label.name + "_rename.sh")
+        ctx.actions.write(rename_script, "\n".join(rename_commands), is_executable = True)
+        inputs.append(rename_script)
+        commands.append(rename_script.path)
 
     if verbose:
         before = ["env", "pwd", "ls -al .", "echo '\n##### SANDBOX BEFORE RUNNING PROTOC'", "find * -type l | grep -v node_modules"]
@@ -352,7 +386,7 @@ def _proto_compile_impl(ctx):
         for f in inputs:
             # buildifier: disable=print
             print("INPUT:", f.path)
-        for f in outputs.values():
+        for f in output_files_by_rel_path.values():
             # buildifier: disable=print
             print("EXPECTED OUTPUT:", f.path)
 
@@ -361,39 +395,24 @@ def _proto_compile_impl(ctx):
         command = "\n".join(commands),
         inputs = inputs,
         mnemonic = "Protoc",
-        outputs = outputs.values(),
+        outputs = output_files_by_rel_path.values(),
         progress_message = "Compiling protoc outputs for %r" % [f.basename for f in protos],
         tools = tools,
         input_manifests = input_manifests,
         env = {"BAZEL_BINDIR": ctx.bin_dir.path},
     )
 
-    if ctx.attr.output_file_suffix:
-        for rel, original_file in outputs.items():
-            dst_name = original_file.basename + ctx.attr.output_file_suffix
-            copy_file = ctx.actions.declare_file(dst_name, sibling = original_file)
-            ctx.actions.run_shell(
-                mnemonic = "ProtoCompileCopyFile",
-                inputs = [original_file],
-                outputs = [copy_file],
-                command = "cp '{dir}/{src}' '{dir}/{dst}'".format(
-                    dir = ctx.bin_dir.path,
-                    src = original_file.short_path,
-                    dst = copy_file.short_path,
-                ),
-                progress_message = "copying output file {} to {}".format(original_file.short_path, copy_file.short_path),
-            )
-            outputs[rel] = copy_file
+    outputs = output_files_by_rel_path.values()
 
     providers = [
         ProtoCompileInfo(
             label = ctx.label,
-            outputs = outputs.values(),
-            output_file_map = outputs,
+            outputs = outputs,
+            output_files_by_rel_path = output_files_by_rel_path,
         ),
     ]
     if ctx.attr.default_info:
-        providers.append(DefaultInfo(files = depset(outputs.values())))
+        providers.append(DefaultInfo(files = depset(outputs)))
 
     return providers
 
