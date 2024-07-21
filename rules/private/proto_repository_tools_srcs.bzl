@@ -181,6 +181,7 @@ PROTO_REPOSITORY_TOOLS_SRCS = [
     "@build_stack_rules_proto//plugin/grpc/grpc-web:BUILD.bazel",
     "@build_stack_rules_proto//plugin/grpc-ecosystem/grpc-gateway:BUILD.bazel",
     "@build_stack_rules_proto//plugin/scalapb/scalapb:BUILD.bazel",
+    "@build_stack_rules_proto//plugin/scalapb/zio-grpc:BUILD.bazel",
     "@build_stack_rules_proto//plugin/stackb/grpc_js:BUILD.bazel",
     "@build_stack_rules_proto//plugin/stephenh/ts-proto:BUILD.bazel",
     "@build_stack_rules_proto//rules:BUILD.bazel",

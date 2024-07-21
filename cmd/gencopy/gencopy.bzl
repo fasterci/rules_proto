@@ -47,7 +47,7 @@ def gencopy_config(ctx):
     )
 
 def gencopy_action(ctx, config, runfiles):
-    """gencopy_action declared a bazel action that runs the gencopy.bash script.
+    """gencopy_action declares a bazel action that runs the gencopy.bash script.
 
     Args:
         ctx: the context object.
